@@ -2,8 +2,10 @@ use std::mem;
 use std::io::{self, BufRead};
 use std::error::Error;
 use std::fmt;
+use std::time::Duration;
 use btoi::btoi;
-use futures::{Future, Poll, Async};
+use futures::{Future, Poll, Async, Stream};
+use futures_timer::Interval;
 use tokio::prelude::AsyncRead;
 use super::resp::{Resp, BulkStr, BinSafeStr, Array};
 use super::decoder::{CR, LF, DecodeError};
@@ -37,22 +39,51 @@ impl Error for ParseError {
 pub fn stateless_decode_resp<R>(reader: R) -> impl Future<Item = (R, Resp), Error = DecodeError> + Send
     where R: AsyncRead + io::BufRead + Send + 'static
 {
+//    BatchRead{
+//        reader: RespParser::new(reader),
+//        interval: Interval::new(Duration::from_micros(100)),
+//        first_read: true,
+//    }
     RespParser::new(reader)
 }
 
+pub struct BatchRead<R: Future> {
+    reader: R,
+    interval: Interval,
+    first_read: bool,
+}
+
+impl<R: Future> Future for BatchRead<R> {
+    type Item = R::Item;
+    type Error = R::Error;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        if !self.first_read {
+            match self.interval.poll() {
+                Ok(Async::NotReady) => return Ok(Async::NotReady),
+                Ok(Async::Ready(Some(()))) => (),
+                Ok(Async::Ready(None)) => (),  // stopping stream should never happen
+                Err(e) => error!("unexpected timer error: {:?}", e),
+            }
+        }
+        self.first_read = false;
+        self.reader.poll()
+    }
+}
+
+pub struct RespParser<R: AsyncRead + io::BufRead + Send + 'static> {
+    state: ParserReadingState<R>
+}
+
 #[derive(Debug)]
-enum State<R> {
+enum ParserReadingState<R> {
     Reading(R),
     Empty,
 }
 
-pub struct RespParser<R: AsyncRead + io::BufRead + Send + 'static> {
-    state: State<R>
-}
-
 impl<R: AsyncRead + io::BufRead + Send + 'static> RespParser<R> {
     fn new(reader: R) -> Self {
-        Self{state: State::Reading(reader)}
+        Self{state: ParserReadingState::Reading(reader)}
     }
 }
 
@@ -62,7 +93,7 @@ impl<R: AsyncRead + io::BufRead + Send + 'static> Future for RespParser<R> {
 
     fn poll(&mut self) -> Poll<Self::Item, DecodeError> {
         let (resp, consumed) = match self.state {
-            State::Reading(ref mut reader) => {
+            ParserReadingState::Reading(ref mut reader) => {
                 let mut buf = match reader.fill_buf() {
                     Ok(buf) => buf,
                     Err(e) => {
@@ -86,15 +117,15 @@ impl<R: AsyncRead + io::BufRead + Send + 'static> Future for RespParser<R> {
                     },
                 }
             },
-            State::Empty => panic!("poll ReadUntil after it's done"),
+            ParserReadingState::Empty => panic!("poll RespParser after it's done"),
         };
 
-        match mem::replace(&mut self.state, State::Empty) {
-            State::Reading(mut reader) => {
+        match mem::replace(&mut self.state, ParserReadingState::Empty) {
+            ParserReadingState::Reading(mut reader) => {
                 reader.consume(consumed);
                 Ok(Async::Ready((reader, resp)))
             },
-            State::Empty => unreachable!(),
+            ParserReadingState::Empty => unreachable!(),
         }
     }
 }

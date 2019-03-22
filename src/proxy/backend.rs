@@ -217,11 +217,11 @@ fn handle_read<H, T, R>(handler: H, reader: R, rx: mpsc::Receiver<T>) -> impl Fu
                         Box::new(send_fut)
                     },
                     Err(DecodeError::InvalidProtocol) => {
-                        println!("backend: invalid protocol");
+                        error!("backend: invalid protocol");
                         Box::new(future::err(BackendError::InvalidProtocol))
                     },
                     Err(DecodeError::Io(e)) => {
-                        println!("backend: io error: {:?}", e);
+                        error!("backend: io error: {:?}", e);
                         Box::new(future::err(BackendError::Io(e)))
                     },
                 };
