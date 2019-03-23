@@ -14,6 +14,9 @@ extern crate serde_json;
 #[macro_use(defer)] extern crate scopeguard;
 extern crate itertools;
 extern crate btoi;
+#[macro_use]
+extern crate more_asserts;
+
 
 pub mod protocol;
 pub mod proxy;
