@@ -2,15 +2,18 @@ use std::io;
 use std::sync;
 use std::iter;
 use std::fmt;
+use std::time::Duration;
 use std::error::Error;
 use std::result::Result;
 use std::boxed::Box;
 use futures::{future, Future, stream, Stream};
 use futures::sync::mpsc;
 use futures::Sink;
+use futures_timer::Interval;
 use tokio::net::TcpStream;
-use tokio::io::{write_all, AsyncRead, AsyncWrite};
+use tokio::io::{write_all, AsyncRead, AsyncWrite, flush};
 use protocol::{Resp, Array, decode_resp, DecodeError, resp_to_buf, stateless_decode_resp};
+use common::batch_write::CircularBufWriter;
 use super::command::{CmdReplySender, CmdReplyReceiver, CommandResult, Command, new_command_pair, CommandError};
 use super::backend::CmdTask;
 use super::database::{DEFAULT_DB, DBTag};
@@ -97,11 +100,14 @@ pub fn handle_conn<H>(handler: H, sock: TcpStream) -> impl Future<Item = (), Err
 {
     let (reader, writer) = sock.split();
     let reader = io::BufReader::new(reader);
+    let writer = CircularBufWriter::new(writer, 16 * 1024);
 
     let (tx, rx) = mpsc::channel(1024);
 
+    let flush_interval = Duration::new(0, 100000);
+
     let reader_handler = handle_read(handler, reader, tx);
-    let writer_handler = handle_write(writer, rx);
+    let writer_handler = handle_write(writer, rx, flush_interval);
 
     let handler = reader_handler.select(writer_handler)
         .then(move |res| {
@@ -165,37 +171,55 @@ fn handle_read<H, R>(handler: H, reader: R, tx: mpsc::Sender<CmdReplyReceiver>) 
     handler.map(|_| ())
 }
 
-fn handle_write<W>(writer: W, rx: mpsc::Receiver<CmdReplyReceiver>) -> impl Future<Item = (), Error = SessionError> + Send
+enum WriteEvent {
+    Write(CmdReplyReceiver),
+    Flush,
+}
+
+fn handle_write<W>(writer: W, rx: mpsc::Receiver<CmdReplyReceiver>, flush_interval: Duration) -> impl Future<Item = (), Error = SessionError> + Send
     where W: AsyncWrite + Send + 'static
 {
-    let handler = rx
-        .map_err(|()| SessionError::Canceled)
-        .fold(writer, |writer, reply_receiver| {
-            reply_receiver.wait_response()
-                .map_err(SessionError::CmdErr)
-                .then(|res| {
-                    let fut : Box<Future<Item=_, Error=SessionError> + Send> = match res {
-                        Ok(resp) => {
-                            let mut buf = vec![];
-                            resp_to_buf(&mut buf, &resp);
-                            let write_fut = write_all(writer, buf)
-                                .map(move |(writer, _)| writer)
-                                .map_err(SessionError::Io);
-                            Box::new(write_fut)
-                        },
-                        Err(e) => {
-                            // TODO: display error here
-                            let err_msg = format!("-Err cmd error {:?}\r\n", e);
-                            let write_fut = write_all(writer, err_msg.into_bytes())
-                                .map(move |(writer, _)| writer)
-                                .map_err(SessionError::Io);
-                            Box::new(write_fut)
-                        },
-                    };
-                    fut
-                })
+    let flush_stream = Interval::new(flush_interval)
+        .map(|()| WriteEvent::Flush)
+        .map_err(SessionError::Io);
+    let write_event_stream = rx.map(WriteEvent::Write).map_err(|e| SessionError::Canceled).select(flush_stream);
+    let handler = write_event_stream
+        .fold(writer, |writer, event| {
+            let fut: Box<Future<Item=W, Error=SessionError> + Send> = match event {
+                WriteEvent::Flush => Box::new(flush(writer).map_err(SessionError::Io)),
+                WriteEvent::Write(reply_receiver) => Box::new(write_to_backend(writer, reply_receiver)),
+            };
+            fut
         });
     handler.map(|_| ())
+}
+
+fn write_to_backend<W>(writer: W, reply_receiver: CmdReplyReceiver) -> impl Future<Item = W, Error = SessionError> + Send
+    where W: AsyncWrite + Send + 'static
+{
+    reply_receiver.wait_response()
+        .map_err(SessionError::CmdErr)
+        .then(|res| {
+            let fut : Box<Future<Item=_, Error=SessionError> + Send> = match res {
+                Ok(resp) => {
+                    let mut buf = vec![];
+                    resp_to_buf(&mut buf, &resp);
+                    let write_fut = write_all(writer, buf)
+                        .map(move |(writer, _)| writer)
+                        .map_err(SessionError::Io);
+                    Box::new(write_fut)
+                },
+                Err(e) => {
+                    // TODO: display error here
+                    let err_msg = format!("-Err cmd error {:?}\r\n", e);
+                    let write_fut = write_all(writer, err_msg.into_bytes())
+                        .map(move |(writer, _)| writer)
+                        .map_err(SessionError::Io);
+                    Box::new(write_fut)
+                },
+            };
+            fut
+        })
 }
 
 #[derive(Debug)]

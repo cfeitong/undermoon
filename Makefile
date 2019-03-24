@@ -10,8 +10,8 @@ server:
 coord:
 	RUST_LOG=undermoon=debug,coordinator=debug target/debug/coordinator
 
-flamegraph:
-	sudo flamegraph -o my_flamegraph.svg target/release/server_proxy
+flame:
+	sudo flamegraph -o $(name).svg target/release/server_proxy
 
 syscall:
 	scripts/syscall.sh

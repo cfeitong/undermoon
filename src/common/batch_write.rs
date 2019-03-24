@@ -1,11 +1,7 @@
 use std::io;
 use std::sync;
 use std::iter;
-use std::fmt;
 use std::cmp;
-use std::error::Error;
-use std::result::Result;
-use std::boxed::Box;
 use futures::{future, Future, Async, Poll};
 use tokio::io::AsyncWrite;
 
@@ -119,7 +115,9 @@ impl CircularBuffer {
     }
 
     fn write_range_to<W: std::io::Write>(&mut self, writer: &mut W, start: usize, end: usize) -> std::io::Result<usize> {
-        // TODO: start == end check
+        if self.empty() {
+            return Ok(0);
+        }
         match writer.write(&self.buf[start..end]) {
             Ok(written) => {
                 self.start += written;

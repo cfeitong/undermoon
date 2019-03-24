@@ -6,7 +6,7 @@ use std::time::Duration;
 use btoi::btoi;
 use futures::{Future, Poll, Async, Stream};
 use futures_timer::Interval;
-use tokio::prelude::AsyncRead;
+use tokio::prelude::{AsyncRead, AsyncWrite};
 use super::resp::{Resp, BulkStr, BinSafeStr, Array};
 use super::decoder::{CR, LF, DecodeError};
 
@@ -39,36 +39,7 @@ impl Error for ParseError {
 pub fn stateless_decode_resp<R>(reader: R) -> impl Future<Item = (R, Resp), Error = DecodeError> + Send
     where R: AsyncRead + io::BufRead + Send + 'static
 {
-//    BatchRead{
-//        reader: RespParser::new(reader),
-//        interval: Interval::new(Duration::from_micros(100)),
-//        first_read: true,
-//    }
     RespParser::new(reader)
-}
-
-pub struct BatchRead<R: Future> {
-    reader: R,
-    interval: Interval,
-    first_read: bool,
-}
-
-impl<R: Future> Future for BatchRead<R> {
-    type Item = R::Item;
-    type Error = R::Error;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        if !self.first_read {
-            match self.interval.poll() {
-                Ok(Async::NotReady) => return Ok(Async::NotReady),
-                Ok(Async::Ready(Some(()))) => (),
-                Ok(Async::Ready(None)) => (),  // stopping stream should never happen
-                Err(e) => error!("unexpected timer error: {:?}", e),
-            }
-        }
-        self.first_read = false;
-        self.reader.poll()
-    }
 }
 
 pub struct RespParser<R: AsyncRead + io::BufRead + Send + 'static> {
